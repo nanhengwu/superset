@@ -1602,7 +1602,7 @@ class DruidCluster(Model, AuditMixinNullable):
         ).format(obj=self)
         return json.loads(requests.get(endpoint).text)['version']
 
-    def refresh_datasources(self, datasource_name=None):
+    def refresh_datasources(self, datasource_name=None, merge_flag=False):
         """Refresh metadata of all datasources in the cluster
 
         If ``datasource_name`` is specified, only that datasource is updated
@@ -1611,7 +1611,7 @@ class DruidCluster(Model, AuditMixinNullable):
         for datasource in self.get_datasources():
             if datasource not in config.get('DRUID_DATA_SOURCE_BLACKLIST'):
                 if not datasource_name or datasource_name == datasource:
-                    DruidDatasource.sync_to_db(datasource, self)
+                    DruidDatasource.sync_to_db(datasource, self, merge_flag)
 
     @property
     def perm(self):
@@ -1777,7 +1777,8 @@ class DruidDatasource(Model, AuditMixinNullable, Queryable):
         try:
             segment_metadata = client.segment_metadata(
                 datasource=self.datasource_name,
-                intervals=lbound + '/' + rbound)
+                intervals=lbound + '/' + rbound,
+                merge=self.merge_flag)
         except Exception as e:
             logging.warning("Failed first attempt to get latest segment")
             logging.exception(e)
@@ -1790,7 +1791,8 @@ class DruidDatasource(Model, AuditMixinNullable, Queryable):
             try:
                 segment_metadata = client.segment_metadata(
                     datasource=self.datasource_name,
-                    intervals=lbound + '/' + rbound)
+                    intervals=lbound + '/' + rbound,
+                    merge=self.merge_flag)
             except Exception as e:
                 logging.warning("Failed 2nd attempt to get latest segment")
                 logging.exception(e)
@@ -1876,7 +1878,7 @@ class DruidDatasource(Model, AuditMixinNullable, Queryable):
         session.commit()
 
     @classmethod
-    def sync_to_db(cls, name, cluster):
+    def sync_to_db(cls, name, cluster, merge):
         """Fetches metadata for that datasource and merges the Superset db"""
         logging.info("Syncing Druid datasource [{}]".format(name))
         session = get_session()
@@ -1889,6 +1891,7 @@ class DruidDatasource(Model, AuditMixinNullable, Queryable):
             flasher("Refreshing datasource [{}]".format(name), "info")
         session.flush()
         datasource.cluster = cluster
+        datasource.merge_flag = merge
         session.flush()
 
         cols = datasource.latest_metadata()
@@ -2316,16 +2319,21 @@ class Log(Model):
     user = relationship('User', backref='logs', foreign_keys=[user_id])
     dttm = Column(DateTime, default=datetime.utcnow)
     dt = Column(Date, default=date.today())
+    duration_ms = Column(Integer)
+    referrer = Column(String(1024))
 
     @classmethod
     def log_this(cls, f):
         """Decorator to log user actions"""
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
+            start_dttm = datetime.now()
             user_id = None
             if g.user:
                 user_id = g.user.get_id()
             d = request.args.to_dict()
+            post_data = request.form or {}
+            d.update(post_data)
             d.update(kwargs)
             slice_id = d.get('slice_id', 0)
             try:
@@ -2337,15 +2345,19 @@ class Log(Model):
                 params = json.dumps(d)
             except:
                 pass
+            value = f(*args, **kwargs)
             log = cls(
                 action=f.__name__,
                 json=params,
                 dashboard_id=d.get('dashboard_id') or None,
                 slice_id=slice_id,
+                duration_ms=(
+                    datetime.now() - start_dttm).total_seconds() * 1000,
+                referrer=request.referrer[:1000] if request.referrer else None,
                 user_id=user_id)
             db.session.add(log)
-            db.session.commit()
-            return f(*args, **kwargs)
+            db.session.flush()
+            return value
         return wrapper
 
 

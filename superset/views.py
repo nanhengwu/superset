@@ -205,7 +205,8 @@ def check_ownership(obj, raise_if_false=True):
 
 def get_user_roles():
     if g.user.is_anonymous():
-        return [appbuilder.sm.find_role('Public')]
+        public_role = config.get('AUTH_ROLE_PUBLIC')
+        return [appbuilder.sm.find_role(public_role)] if public_role else []
     return g.user.roles
 
 
@@ -1369,6 +1370,7 @@ class Superset(BaseSupersetView):
         viz_obj = self.get_viz(slice_id)
         return redirect(viz_obj.get_url(**request.args))
 
+    @log_this
     @has_access_api
     @expose("/explore_json/<datasource_type>/<datasource_id>/")
     def explore_json(self, datasource_type, datasource_id):
@@ -2060,7 +2062,7 @@ class Superset(BaseSupersetView):
                     models.SqlaTable.table_name == table_name)
             ).first()
             if not table:
-                json_error_response(__(
+                return json_error_response(__(
                     "Table %(t)s wasn't found in the database %(d)s",
                     t=table_name, s=db_name), status=404)
             slices = session.query(models.Slice).filter_by(
@@ -2377,6 +2379,9 @@ class Superset(BaseSupersetView):
     @log_this
     def results(self, key):
         """Serves a key off of the results backend"""
+        if not results_backend:
+            return json_error_response("Results backend isn't configured")
+
         blob = results_backend.get(key)
         if blob:
             json_payload = zlib.decompress(blob)
@@ -2386,7 +2391,7 @@ class Superset(BaseSupersetView):
             mydb = session.query(models.Database).filter_by(id=db_id).one()
 
             if not self.database_access(mydb):
-                json_error_response(
+                return json_error_response(
                     get_database_access_error_msg(mydb.database_name))
 
             return Response(
